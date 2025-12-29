@@ -38,9 +38,36 @@ except ImportError as e:
     print(f"⚠️  ML detection not available: {e}")
     print("   Install: pip install detoxify")
 
-# Configure your post URL here
-POST_URL = "https://www.instagram.com/p/DRGQ0nIEwMz/c/17931983388134521/"
-
+def get_post_url():
+    """
+    Prompt user to enter Instagram post URL.
+    Validates the URL format.
+    """
+    print("\n" + "=" * 70)
+    print("📋 ENTER INSTAGRAM POST URL")
+    print("=" * 70)
+    
+    while True:
+        print("\nPlease paste the Instagram post URL:")
+        print("Example: https://www.instagram.com/p/ABC123xyz/")
+        print()
+        url = input("➡️  URL: ").strip()
+        
+        # Basic validation
+        if not url:
+            print("\n❌ URL cannot be empty. Please try again.")
+            continue
+        
+        if "instagram.com" not in url.lower():
+            print("\n❌ Invalid URL. Must be an Instagram URL.")
+            continue
+        
+        if "/p/" not in url and "/reel/" not in url:
+            print("\n❌ Invalid format. URL should contain /p/ or /reel/")
+            continue
+        
+        print(f"\n✅ URL accepted!")
+        return url
 
 def detect_with_keyword_func(comment):
     """Wrapper for keyword detection."""
@@ -48,11 +75,10 @@ def detect_with_keyword_func(comment):
         return True, find_abusive_words(comment)
     return False, []
 
-
-def save_results(comments, results_data, filename="results.json", detection_mode="keyword"):
+def save_results(comments, results_data, post_url, filename="results.json", detection_mode="keyword"):
     """Save results to JSON file."""
     results = {
-        "post_url": POST_URL,
+        "post_url": post_url,
         "scan_time": datetime.now().isoformat(),
         "detection_mode": detection_mode,
         "total_comments": len(comments),
@@ -84,8 +110,7 @@ def save_results(comments, results_data, filename="results.json", detection_mode
     
     print(f"💾 Results saved to {filename}")
 
-
-def keyword_detection(comments):
+def keyword_detection(comments, comment_map):
     """Original keyword-based detection."""
     print("\n🔍 Running keyword detection...")
     abusive_data = []
@@ -94,16 +119,21 @@ def keyword_detection(comments):
         if is_abusive(comment):
             normalized = normalize_text(comment)
             words_found = find_abusive_words(comment)
+            
+            # Get comment metadata (link, username)
+            metadata = comment_map.get(comment, {})
+            
             abusive_data.append({
                 "original": comment,
                 "normalized": normalized,
-                "matched_words": words_found
+                "matched_words": words_found,
+                "link": metadata.get('link', ''),
+                "username": metadata.get('username', '')
             })
     
     return abusive_data
 
-
-def ml_detection(comments, threshold=0.5):
+def ml_detection(comments, comment_map, threshold=0.5):
     """ML-based toxicity detection."""
     print(f"\n🔍 Running ML detection (threshold: {threshold})...")
     
@@ -113,12 +143,16 @@ def ml_detection(comments, threshold=0.5):
     # Filter abusive ones
     abusive_comments = get_abusive_comments(all_results, threshold=threshold)
     
-    # Add severity levels
+    # Add severity levels and metadata
     for comment in abusive_comments:
         comment["severity"] = get_severity(comment["confidence"])
+        
+        # Add link and username
+        metadata = comment_map.get(comment["original"], {})
+        comment["link"] = metadata.get('link', '')
+        comment["username"] = metadata.get('username', '')
     
     return abusive_comments
-
 
 def display_keyword_results(results, comments):
     """Display keyword detection results."""
@@ -137,10 +171,13 @@ def display_keyword_results(results, comments):
             print(f"{i}. {data['original']}")
             print(f"   Normalized: {data['normalized']}")
             print(f"   🔍 Matched: {', '.join(data['matched_words'])}")
+            if data.get('username'):
+                print(f"   👤 User: {data['username']}")
+            if data.get('link'):
+                print(f"   🔗 Link: {data['link']}")
             print()
     else:
         print("\n✅ No abusive comments detected!")
-
 
 def display_ml_results(results, comments):
     """Display ML detection results."""
@@ -180,6 +217,12 @@ def display_ml_results(results, comments):
             print(f"   Severity: {data['severity'].upper()} ({data['confidence']:.2%})")
             print(f"   Category: {data['category']}")
             
+            # Show username and link
+            if data.get('username'):
+                print(f"   👤 User: {data['username']}")
+            if data.get('link'):
+                print(f"   🔗 Link: {data['link']}")
+            
             # Show top scores
             if data.get("scores"):
                 top_scores = sorted(data["scores"].items(), key=lambda x: x[1], reverse=True)[:3]
@@ -188,7 +231,6 @@ def display_ml_results(results, comments):
             print()
     else:
         print("\n✅ No abusive comments detected!")
-
 
 def display_hybrid_results(results, comments):
     """Display hybrid detection results."""
@@ -231,16 +273,19 @@ def display_hybrid_results(results, comments):
             print(f"   Matched: {', '.join(data['matched_words'])}")
             print()
 
-
 def main():
     parser = argparse.ArgumentParser(description="Instagram comment abuse detector with ML")
-    parser.add_argument('--post', '-p', default=POST_URL, help='Post URL to scan')
+    parser.add_argument('--post', '-p', default=None, help='Post URL to scan (optional - will prompt if not provided)')
     parser.add_argument('--mode', '-m', choices=['keyword', 'ml', 'hybrid'], default='ml',
                        help='Detection mode: keyword (fast), ml (accurate), hybrid (both)')
     parser.add_argument('--threshold', '-t', type=float, default=0.7,
-                       help='ML confidence threshold (0.0-1.0, default: 0.5)')
+                       help='ML confidence threshold (0.0-1.0, default: 0.7)')
     parser.add_argument('--test', action='store_true',
                        help='Test ML model with sample comments')
+    parser.add_argument('--scrolls', '-s', type=int, default=20,
+                       help='Number of scrolls to load comments (default: 20)')
+    parser.add_argument('--scroll-delay', '-d', type=int, default=1500,
+                       help='Delay between scrolls in ms (default: 1500)')
     args = parser.parse_args()
     
     # Test mode
@@ -260,34 +305,55 @@ def main():
         print("\n   Alternative: pip install transformers torch")
         return
     
+    # Print header
     print("=" * 70)
     print("📱 INSTAGRAM COMMENT ABUSE DETECTOR")
+    print("=" * 70)
+    
+    # Get post URL from user input or command line argument
+    if args.post:
+        post_url = args.post
+        print(f"\n✅ Using provided URL: {post_url}")
+    else:
+        post_url = get_post_url()
+    
+    print("\n" + "=" * 70)
+    print("⚙️  DETECTION SETTINGS")
+    print("=" * 70)
     print(f"   Mode: {args.mode.upper()}")
     if args.mode in ['ml', 'hybrid']:
         print(f"   Threshold: {args.threshold}")
+    print(f"   Max scrolls: {args.scrolls}")
+    print(f"   Scroll delay: {args.scroll_delay}ms")
     print("=" * 70)
-    print()
     
     # Scrape comments
-    print(f"🎯 Target Post: {args.post}")
+    print(f"\n🎯 Target Post: {post_url}")
     print()
     
-    comments = scrape_comments(args.post, max_scrolls=20, scroll_delay=1500)
+    comments_data = scrape_comments(post_url, max_scrolls=args.scrolls, scroll_delay=args.scroll_delay)
     
-    if not comments:
+    if not comments_data:
         print("\n❌ No comments found. Please check:")
         print("   - You're logged in (run login.py)")
         print("   - The post URL is correct")
         print("   - The post has comments")
         return
     
+    # Extract text for compatibility with detection functions
+    from scraper import get_comments_text_only
+    comments = get_comments_text_only(comments_data)
+    
+    # Create a mapping of comment text to full data (for links)
+    comment_map = {c['text']: c for c in comments_data if c.get('text')}
+    
     # Run detection based on mode
     if args.mode == 'keyword':
-        results = keyword_detection(comments)
+        results = keyword_detection(comments, comment_map)
         display_keyword_results(results, comments)
         
     elif args.mode == 'ml':
-        results = ml_detection(comments, threshold=args.threshold)
+        results = ml_detection(comments, comment_map, threshold=args.threshold)
         display_ml_results(results, comments)
         
     elif args.mode == 'hybrid':
@@ -295,12 +361,14 @@ def main():
         display_hybrid_results(results, comments)
     
     # Save results
-    save_results(comments, results, detection_mode=args.mode)
+    save_results(comments, results, post_url, detection_mode=args.mode)
     
     print("\n" + "=" * 70)
-    print("\n💡 TIP: Adjust threshold with --threshold 0.3 (more sensitive)")
-    print("        or --threshold 0.7 (less false positives)")
-
+    print("💡 TIPS:")
+    print("   • Adjust threshold: --threshold 0.3 (more sensitive) or 0.7 (less false positives)")
+    print("   • Load more comments: --scrolls 50 (default: 20)")
+    print("   • Faster/slower scrolling: --scroll-delay 1000 (default: 1500ms)")
+    print("=" * 70)
 
 if __name__ == "__main__":
     main()
