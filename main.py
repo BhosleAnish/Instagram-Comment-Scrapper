@@ -76,39 +76,137 @@ def detect_with_keyword_func(comment):
     return False, []
 
 def save_results(comments, results_data, post_url, filename="results.json", detection_mode="keyword"):
-    """Save results to JSON file."""
+    """Save results to JSON file with better structure."""
+    from datetime import datetime
+    import json
+    
     results = {
-        "post_url": post_url,
-        "scan_time": datetime.now().isoformat(),
-        "detection_mode": detection_mode,
-        "total_comments": len(comments),
+        "scan_metadata": {
+            "post_url": post_url,
+            "scan_time": datetime.now().isoformat(),
+            "detection_mode": detection_mode,
+            "total_comments_scanned": len(comments),
+        }
     }
     
     if detection_mode == "keyword":
-        results["abusive_count"] = len(results_data)
+        results["summary"] = {
+            "total_abusive": len(results_data),
+            "abuse_rate": f"{len(results_data)/len(comments)*100:.1f}%" if comments else "0%"
+        }
         results["abusive_comments"] = results_data
         
     elif detection_mode == "ml":
-        results["abusive_count"] = len(results_data)
+        # Group by severity
+        severity_breakdown = {"severe": 0, "high": 0, "medium": 0, "low": 0}
+        for item in results_data:
+            severity_breakdown[item.get("severity", "low")] += 1
+        
+        results["summary"] = {
+            "total_abusive": len(results_data),
+            "abuse_rate": f"{len(results_data)/len(comments)*100:.1f}%" if comments else "0%",
+            "severity_breakdown": severity_breakdown
+        }
         results["abusive_comments"] = results_data
         
     elif detection_mode == "hybrid":
         total_abusive = len(results_data["both"]) + len(results_data["ml_only"]) + len(results_data["keyword_only"])
-        results["abusive_count"] = total_abusive
-        results["detection_breakdown"] = {
-            "caught_by_both": len(results_data["both"]),
-            "ml_only": len(results_data["ml_only"]),
-            "keyword_only": len(results_data["keyword_only"])
+        results["summary"] = {
+            "total_abusive": total_abusive,
+            "abuse_rate": f"{total_abusive/len(comments)*100:.1f}%" if comments else "0%",
+            "detection_breakdown": {
+                "caught_by_both": len(results_data["both"]),
+                "ml_only": len(results_data["ml_only"]),
+                "keyword_only": len(results_data["keyword_only"])
+            }
         }
         results["abusive_comments"] = results_data
     
     # Ensure everything is JSON serializable
     results = make_json_serializable(results)
     
+    # Save JSON
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     
-    print(f"💾 Results saved to {filename}")
+    print(f"\n💾 Results saved to {filename}")
+    
+    # Also save as CSV for easy viewing in Excel
+    save_results_as_csv(results, results_data, detection_mode, filename.replace('.json', '.csv'))
+
+def save_results_as_csv(results, results_data, detection_mode, filename="results.csv"):
+    """Save results as CSV for easy viewing."""
+    import csv
+    
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            if detection_mode == "keyword":
+                writer = csv.writer(f)
+                writer.writerow(['#', 'Comment', 'Username', 'Matched Keywords', 'Comment Link'])
+                for i, item in enumerate(results_data, 1):
+                    writer.writerow([
+                        i,
+                        item.get('original', ''),
+                        item.get('username', ''),
+                        ', '.join(item.get('matched_words', [])),
+                        item.get('link', '')
+                    ])
+            
+            elif detection_mode == "ml":
+                writer = csv.writer(f)
+                writer.writerow(['#', 'Comment', 'Username', 'Severity', 'Confidence', 'Category', 'Comment Link'])
+                for i, item in enumerate(results_data, 1):
+                    writer.writerow([
+                        i,
+                        item.get('original', ''),
+                        item.get('username', ''),
+                        item.get('severity', '').upper(),
+                        f"{item.get('confidence', 0):.2%}",
+                        item.get('category', ''),
+                        item.get('link', '')
+                    ])
+            
+            elif detection_mode == "hybrid":
+                writer = csv.writer(f)
+                writer.writerow(['#', 'Detection Method', 'Comment', 'Username', 'Details', 'Comment Link'])
+                
+                idx = 1
+                for item in results_data.get('both', []):
+                    writer.writerow([
+                        idx,
+                        'BOTH (High Confidence)',
+                        item.get('original', ''),
+                        item.get('username', ''),
+                        f"Keywords: {', '.join(item.get('matched_words', []))} | ML: {item.get('category', '')} ({item.get('confidence', 0):.2%})",
+                        item.get('link', '')
+                    ])
+                    idx += 1
+                
+                for item in results_data.get('ml_only', []):
+                    writer.writerow([
+                        idx,
+                        'ML Only',
+                        item.get('original', ''),
+                        item.get('username', ''),
+                        f"{item.get('severity', '').upper()} | {item.get('category', '')} ({item.get('confidence', 0):.2%})",
+                        item.get('link', '')
+                    ])
+                    idx += 1
+                
+                for item in results_data.get('keyword_only', []):
+                    writer.writerow([
+                        idx,
+                        'Keyword Only',
+                        item.get('comment', ''),
+                        item.get('username', ''),
+                        f"Matched: {', '.join(item.get('matched_words', []))}",
+                        item.get('link', '')
+                    ])
+                    idx += 1
+        
+        print(f"📊 Results also saved as CSV: {filename}")
+    except Exception as e:
+        print(f"   ⚠️  Could not save CSV: {e}")
 
 def keyword_detection(comments, comment_map):
     """Original keyword-based detection."""
@@ -123,6 +221,13 @@ def keyword_detection(comments, comment_map):
             # Get comment metadata (link, username)
             metadata = comment_map.get(comment, {})
             
+            # If not found, try partial match
+            if not metadata:
+                for map_text, map_data in comment_map.items():
+                    if comment in map_text or map_text in comment:
+                        metadata = map_data
+                        break
+            
             abusive_data.append({
                 "original": comment,
                 "normalized": normalized,
@@ -131,26 +236,61 @@ def keyword_detection(comments, comment_map):
                 "username": metadata.get('username', '')
             })
     
+    # Count metadata
+    with_username = sum(1 for c in abusive_data if c.get('username'))
+    with_link = sum(1 for c in abusive_data if c.get('link'))
+    
+    print(f"   ✅ Found {len(abusive_data)} abusive comments")
+    print(f"   📊 Metadata status:")
+    print(f"      - {with_username}/{len(abusive_data)} have usernames")
+    print(f"      - {with_link}/{len(abusive_data)} have comment links")
+    
     return abusive_data
 
 def ml_detection(comments, comment_map, threshold=0.5):
     """ML-based toxicity detection."""
     print(f"\n🔍 Running ML detection (threshold: {threshold})...")
+    print(f"   Analyzing {len(comments)} comments...")
     
     # Analyze all comments
     all_results = analyze_batch(comments, show_progress=True)
     
+    print(f"   ✅ Analysis complete")
+    print(f"   🔍 Filtering abusive comments (threshold: {threshold})...")
+    
     # Filter abusive ones
     abusive_comments = get_abusive_comments(all_results, threshold=threshold)
+    
+    print(f"   ✅ Found {len(abusive_comments)} abusive comments")
+    print(f"   📝 Adding metadata (username, links)...")
     
     # Add severity levels and metadata
     for comment in abusive_comments:
         comment["severity"] = get_severity(comment["confidence"])
         
-        # Add link and username
-        metadata = comment_map.get(comment["original"], {})
+        # Add link and username from comment_map
+        comment_text = comment.get("original", "")
+        metadata = comment_map.get(comment_text, {})
+        
         comment["link"] = metadata.get('link', '')
         comment["username"] = metadata.get('username', '')
+        
+        # Debug: Check if metadata was found
+        if not metadata:
+            # Try to find partial match (in case of text differences)
+            for map_text, map_data in comment_map.items():
+                if comment_text in map_text or map_text in comment_text:
+                    comment["link"] = map_data.get('link', '')
+                    comment["username"] = map_data.get('username', '')
+                    break
+    
+    # Count how many have metadata
+    with_username = sum(1 for c in abusive_comments if c.get('username'))
+    with_link = sum(1 for c in abusive_comments if c.get('link'))
+    
+    print(f"   📊 Metadata status:")
+    print(f"      - {with_username}/{len(abusive_comments)} have usernames")
+    print(f"      - {with_link}/{len(abusive_comments)} have comment links")
     
     return abusive_comments
 
@@ -188,7 +328,6 @@ def display_ml_results(results, comments):
     print(f"Abusive comments found: {len(results)}")
     if comments:
         print(f"Abuse rate: {len(results)/len(comments)*100:.1f}%")
-    print("=" * 70)
     
     if results:
         # Group by severity
@@ -204,7 +343,9 @@ def display_ml_results(results, comments):
             if sev in severity_groups:
                 print(f"  {sev.upper()}: {len(severity_groups[sev])}")
         
-        print("\n⚠️  ABUSIVE COMMENTS:\n")
+        print("=" * 70)
+        
+        print("\n⚠️  ALL ABUSIVE COMMENTS:\n")
         for i, data in enumerate(results, 1):
             severity_emoji = {
                 "severe": "🔴",
@@ -282,8 +423,8 @@ def main():
                        help='ML confidence threshold (0.0-1.0, default: 0.7)')
     parser.add_argument('--test', action='store_true',
                        help='Test ML model with sample comments')
-    parser.add_argument('--scrolls', '-s', type=int, default=20,
-                       help='Number of scrolls to load comments (default: 20)')
+    parser.add_argument('--scrolls', '-s', type=int, default=50,
+                       help='Number of scrolls to load comments (default: 50)')
     parser.add_argument('--scroll-delay', '-d', type=int, default=1500,
                        help='Delay between scrolls in ms (default: 1500)')
     args = parser.parse_args()
@@ -347,6 +488,27 @@ def main():
     # Create a mapping of comment text to full data (for links)
     comment_map = {c['text']: c for c in comments_data if c.get('text')}
     
+    print(f"\n📊 Comment extraction summary:")
+    print(f"   Total comments: {len(comments)}")
+    print(f"   Comments with usernames: {sum(1 for c in comments_data if c.get('username'))}")
+    print(f"   Comments with links: {sum(1 for c in comments_data if c.get('link'))}")
+    
+    # Save all extracted comments for debugging
+    try:
+        with open("all_comments_debug.json", "w", encoding="utf-8") as f:
+            json.dump(comments_data, f, indent=2, ensure_ascii=False)
+        print(f"   💾 Debug: All comments saved to all_comments_debug.json")
+    except:
+        pass
+    
+    # Debug: Show sample of comment_map
+    if len(comment_map) > 0:
+        sample = list(comment_map.items())[0]
+        print(f"\n   📝 Sample comment data:")
+        print(f"      Text: {sample[0][:50]}...")
+        print(f"      Username: {sample[1].get('username', 'N/A')}")
+        print(f"      Link: {'Yes' if sample[1].get('link') else 'No'}")
+    
     # Run detection based on mode
     if args.mode == 'keyword':
         results = keyword_detection(comments, comment_map)
@@ -365,8 +527,10 @@ def main():
     
     print("\n" + "=" * 70)
     print("💡 TIPS:")
+    print("   • Results saved in both JSON and CSV formats")
+    print("   • Open results.csv in Excel for easy viewing")
     print("   • Adjust threshold: --threshold 0.3 (more sensitive) or 0.7 (less false positives)")
-    print("   • Load more comments: --scrolls 50 (default: 20)")
+    print("   • Load more comments: --scrolls 100 (default: 50)")
     print("   • Faster/slower scrolling: --scroll-delay 1000 (default: 1500ms)")
     print("=" * 70)
 
